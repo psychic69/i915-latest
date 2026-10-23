@@ -4,27 +4,29 @@ on:
   workflow_dispatch:
     inputs:
       kernel_version:
-        description: "Exact kernel version (e.g. 6.6.58-Unraid)"
+        description: "Kernel string from uname -r"
         required: true
-        default: "6.6.58-Unraid"
+        default: "6.18.58-Unraid"
       base_version:
-        description: "Base kernel version from kernel.org (e.g. 6.6.58)"
+        description: "Base kernel version from kernel.org"
         required: true
-        default: "6.6.58"
+        default: "6.18.58"
 
 jobs:
   build:
     runs-on: ubuntu-latest
     container:
-      # Use Debian bookworm or an environment with compatible GCC for the target kernel
       image: debian:bookworm
 
     steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
       - name: Install Build Dependencies
         run: |
           apt-get update && apt-get install -y \
             build-essential libncurses-dev bison flex libssl-dev libelf-dev \
-            bc git curl xz-utils kmod
+            bc git curl xz-utils kmod python3
 
       - name: Download Vanilla Kernel Source
         run: |
@@ -32,17 +34,25 @@ jobs:
           tar -xf "linux-${{ github.event.inputs.base_version }}.tar.xz"
           mv "linux-${{ github.event.inputs.base_version }}" linux-src
 
-      - name: Prepare Kernel Headers
+      - name: Generate Kernel Build Headers
         run: |
           cd linux-src
-          # Match Unraid's vermagic string
+
+          # 1. Match vermagic exactly
           sed -i 's/^EXTRAVERSION =.*/EXTRAVERSION = -Unraid/' Makefile
-          
-          # Download or inject the Unraid .config (e.g., from an existing repo, gist, or committed file)
-          # Alternatively fetch from Limetech's release or ich777's archive:
-          curl -sSL "https://raw.githubusercontent.com/ich777/unraid_kernel/master/configs/${{ github.event.inputs.kernel_version }}.config" -o .config || \
-            make defconfig # fallback if you commit your own config to the repo
-          
+
+          # 2. Base x86_64 configuration
+          make x86_64_defconfig
+
+          # 3. Enable module system & DRM/PCI prerequisites for i915
+          ./scripts/config --enable CONFIG_MODULES
+          ./scripts/config --enable CONFIG_MODVERSIONS
+          ./scripts/config --enable CONFIG_DRM
+          ./scripts/config --enable CONFIG_DRM_I915
+          ./scripts/config --enable CONFIG_PCI
+          ./scripts/config --enable CONFIG_ACPI
+
+          # 4. Resolve defaults and build module headers & scripts
           make olddefconfig
           make modules_prepare
 
@@ -50,27 +60,31 @@ jobs:
         run: |
           git clone https://github.com/strongtz/i915-sriov-dkms.git
           cd i915-sriov-dkms
+          
+          # Build against our prepared kernel tree
           make -C ../linux-src M=$(pwd) modules
 
-      - name: Package for Unraid (.txz)
+      - name: Package Slackware .txz
         run: |
           KVER="${{ github.event.inputs.kernel_version }}"
-          DEST="/tmp/pkg/lib/modules/${KVER}/kernel/drivers/gpu/drm/i915"
-          mkdir -p "${DEST}"
-          mkdir -p /tmp/pkg/install
+          PKG_DIR="/tmp/pkg"
+          TARGET_DIR="${PKG_DIR}/lib/modules/${KVER}/kernel/drivers/gpu/drm/i915"
+          
+          mkdir -p "${TARGET_DIR}"
+          mkdir -p "${PKG_DIR}/install"
 
-          # Copy and compress module
-          xz -c i915-sriov-dkms/i915.ko > "${DEST}/i915.ko.xz"
+          # Compress module with xz
+          xz -c i915-sriov-dkms/i915.ko > "${TARGET_DIR}/i915.ko.xz"
 
-          # Create Slackware install script
-          cat << 'EOF' > /tmp/pkg/install/doinst.sh
+          # Install hook for depmod
+          cat << 'EOF' > "${PKG_DIR}/install/doinst.sh"
           #!/bin/bash
           depmod -a
           EOF
-          chmod +x /tmp/pkg/install/doinst.sh
+          chmod +x "${PKG_DIR}/install/doinst.sh"
 
-          # Create tar.xz package
-          cd /tmp/pkg
+          # Build package and hash
+          cd "${PKG_DIR}"
           tar -cJf "/tmp/i915-sriov-${KVER}.txz" *
           cd /tmp
           md5sum "i915-sriov-${KVER}.txz" > "i915-sriov-${KVER}.txz.md5"
