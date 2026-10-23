@@ -1,0 +1,84 @@
+name: Build i915 SR-IOV for Unraid
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_version:
+        description: "Exact kernel version (e.g. 6.6.58-Unraid)"
+        required: true
+        default: "6.6.58-Unraid"
+      base_version:
+        description: "Base kernel version from kernel.org (e.g. 6.6.58)"
+        required: true
+        default: "6.6.58"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      # Use Debian bookworm or an environment with compatible GCC for the target kernel
+      image: debian:bookworm
+
+    steps:
+      - name: Install Build Dependencies
+        run: |
+          apt-get update && apt-get install -y \
+            build-essential libncurses-dev bison flex libssl-dev libelf-dev \
+            bc git curl xz-utils kmod
+
+      - name: Download Vanilla Kernel Source
+        run: |
+          curl -LO "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-${{ github.event.inputs.base_version }}.tar.xz"
+          tar -xf "linux-${{ github.event.inputs.base_version }}.tar.xz"
+          mv "linux-${{ github.event.inputs.base_version }}" linux-src
+
+      - name: Prepare Kernel Headers
+        run: |
+          cd linux-src
+          # Match Unraid's vermagic string
+          sed -i 's/^EXTRAVERSION =.*/EXTRAVERSION = -Unraid/' Makefile
+          
+          # Download or inject the Unraid .config (e.g., from an existing repo, gist, or committed file)
+          # Alternatively fetch from Limetech's release or ich777's archive:
+          curl -sSL "https://raw.githubusercontent.com/ich777/unraid_kernel/master/configs/${{ github.event.inputs.kernel_version }}.config" -o .config || \
+            make defconfig # fallback if you commit your own config to the repo
+          
+          make olddefconfig
+          make modules_prepare
+
+      - name: Compile i915 SR-IOV Module
+        run: |
+          git clone https://github.com/strongtz/i915-sriov-dkms.git
+          cd i915-sriov-dkms
+          make -C ../linux-src M=$(pwd) modules
+
+      - name: Package for Unraid (.txz)
+        run: |
+          KVER="${{ github.event.inputs.kernel_version }}"
+          DEST="/tmp/pkg/lib/modules/${KVER}/kernel/drivers/gpu/drm/i915"
+          mkdir -p "${DEST}"
+          mkdir -p /tmp/pkg/install
+
+          # Copy and compress module
+          xz -c i915-sriov-dkms/i915.ko > "${DEST}/i915.ko.xz"
+
+          # Create Slackware install script
+          cat << 'EOF' > /tmp/pkg/install/doinst.sh
+          #!/bin/bash
+          depmod -a
+          EOF
+          chmod +x /tmp/pkg/install/doinst.sh
+
+          # Create tar.xz package
+          cd /tmp/pkg
+          tar -cJf "/tmp/i915-sriov-${KVER}.txz" *
+          cd /tmp
+          md5sum "i915-sriov-${KVER}.txz" > "i915-sriov-${KVER}.txz.md5"
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: i915-sriov-${{ github.event.inputs.kernel_version }}
+          path: |
+            /tmp/i915-sriov-*.txz
+            /tmp/i915-sriov-*.txz.md5
