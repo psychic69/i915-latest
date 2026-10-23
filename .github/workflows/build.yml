@@ -38,13 +38,10 @@ jobs:
         run: |
           cd linux-src
 
-          # 1. Match vermagic exactly
           sed -i 's/^EXTRAVERSION =.*/EXTRAVERSION = -Unraid/' Makefile
-
-          # 2. Base x86_64 configuration
           make x86_64_defconfig
 
-          # 3. Enable module system & DRM/PCI prerequisites
+          # Modules & Core Drivers
           ./scripts/config --enable CONFIG_MODULES
           ./scripts/config --enable CONFIG_MODVERSIONS
           ./scripts/config --enable CONFIG_DRM
@@ -52,13 +49,20 @@ jobs:
           ./scripts/config --enable CONFIG_PCI
           ./scripts/config --enable CONFIG_ACPI
 
-          # 4. Enable Heterogeneous Memory Management (required by DRM_GPUSVM in i915-sriov)
-          ./scripts/config --enable CONFIG_MMU_NOTIFIER
+          # Full MM dependency tree required for HMM_MIRROR & GPUSVM
+          ./scripts/config --enable CONFIG_MMU
+          ./scripts/config --enable CONFIG_SPARSEMEM_VMEMMAP
+          ./scripts/config --enable CONFIG_MEMORY_HOTPLUG
+          ./scripts/config --enable CONFIG_MEMORY_HOTREMOVE
           ./scripts/config --enable CONFIG_ZONE_DEVICE
           ./scripts/config --enable CONFIG_DEVICE_PRIVATE
+          ./scripts/config --enable CONFIG_FS_DAX
+          ./scripts/config --enable CONFIG_MMU_NOTIFIER
           ./scripts/config --enable CONFIG_HMM_MIRROR
+          
+          echo "CONFIG_HMM_MIRROR=y" >> .config
+          echo "CONFIG_DRM_GPUSVM=y" >> .config
 
-          # 5. Resolve defaults and build module headers & scripts
           make olddefconfig
           make modules_prepare
 
@@ -66,8 +70,6 @@ jobs:
         run: |
           git clone https://github.com/strongtz/i915-sriov-dkms.git
           cd i915-sriov-dkms
-          
-          # Build against our prepared kernel tree
           make -C ../linux-src M=$(pwd) modules
 
       - name: Package Slackware .txz
@@ -78,18 +80,24 @@ jobs:
           
           mkdir -p "${TARGET_DIR}"
           mkdir -p "${PKG_DIR}/install"
+          mkdir -p "${PKG_DIR}/etc/modprobe.d"
 
-          # Compress module with xz
+          # 1. Compress driver module
           xz -c i915-sriov-dkms/i915.ko > "${TARGET_DIR}/i915.ko.xz"
 
-          # Install hook for depmod
+          # 2. Modprobe options file for Raptor Lake UHD 770
+          cat << 'EOF' > "${PKG_DIR}/etc/modprobe.d/i915.conf"
+          options i915 enable_guc=3 max_vfs=7 xelp_enable_ccs=1
+          EOF
+
+          # 3. Post-install depmod hook
           cat << 'EOF' > "${PKG_DIR}/install/doinst.sh"
           #!/bin/bash
           depmod -a
           EOF
           chmod +x "${PKG_DIR}/install/doinst.sh"
 
-          # Build package and hash
+          # 4. Package and hash
           cd "${PKG_DIR}"
           tar -cJf "/tmp/i915-sriov-${KVER}.txz" *
           cd /tmp
