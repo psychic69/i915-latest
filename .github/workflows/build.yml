@@ -44,7 +44,7 @@ jobs:
           # 2. Base x86_64 configuration
           make x86_64_defconfig
 
-          # 3. Enable module system & DRM/PCI prerequisites for i915
+          # 3. Enable module system & DRM/PCI prerequisites
           ./scripts/config --enable CONFIG_MODULES
           ./scripts/config --enable CONFIG_MODVERSIONS
           ./scripts/config --enable CONFIG_DRM
@@ -52,7 +52,13 @@ jobs:
           ./scripts/config --enable CONFIG_PCI
           ./scripts/config --enable CONFIG_ACPI
 
-          # 4. Resolve defaults and build module headers & scripts
+          # 4. Enable Heterogeneous Memory Management (required by DRM_GPUSVM in i915-sriov)
+          ./scripts/config --enable CONFIG_MMU_NOTIFIER
+          ./scripts/config --enable CONFIG_ZONE_DEVICE
+          ./scripts/config --enable CONFIG_DEVICE_PRIVATE
+          ./scripts/config --enable CONFIG_HMM_MIRROR
+
+          # 5. Resolve defaults and build module headers & scripts
           make olddefconfig
           make modules_prepare
 
